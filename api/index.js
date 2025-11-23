@@ -226,8 +226,7 @@ app.get("/export/keys.txt", async (req, res) => {
     const content = rows
       .map(
         (r) =>
-          `Key: ${r.key} | Usada: ${r.used ? "Sim" : "Não"} | Usuário: ${
-            r.user || "-"
+          `Key: ${r.key} | Usada: ${r.used ? "Sim" : "Não"} | Usuário: ${r.user || "-"
           }`
       )
       .join("\n");
