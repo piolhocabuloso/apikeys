@@ -98,7 +98,7 @@ app.post("/keys", async (req, res) => {
       return res.status(400).json({ error: "Key já existe" });
 
     await client.query(
-      `INSERT INTO keys (key, created_at, used, user, expires_at)
+      `INSERT INTO keys (key, created_at, used, username, expires_at)
        VALUES ($1, NOW(), false, null, null)`,
       [newKey]
     );
@@ -123,7 +123,7 @@ app.post("/keys/temporaria", async (req, res) => {
       return res.status(400).json({ error: "Key já existe" });
 
     await client.query(
-      `INSERT INTO keys (key, created_at, used, user, expires_at)
+      `INSERT INTO keys (key, created_at, used, username, expires_at)
        VALUES ($1, NOW(), false, null, $2)`,
       [key, expires_at]
     );
@@ -179,7 +179,7 @@ app.put("/keys/:key", async (req, res) => {
 app.post("/keys/:key/use", async (req, res) => {
   try {
     const key = req.params.key;
-    const user = req.body.user || null;
+    const username = req.body.username || null;
 
     const { rows } = await client.query(
       "SELECT * FROM keys WHERE key = $1 LIMIT 1",
@@ -193,11 +193,11 @@ app.post("/keys/:key/use", async (req, res) => {
       return res.status(400).json({ error: "Key já usada" });
 
     await client.query(
-      "UPDATE keys SET used = true, user = $1 WHERE key = $2",
-      [user, key]
+      "UPDATE keys SET used = true, username = $1 WHERE key = $2",
+      [username, key]
     );
 
-    res.json({ success: true, key, user });
+    res.json({ success: true, key, username });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -207,7 +207,7 @@ app.post("/keys/:key/use", async (req, res) => {
 app.get("/keys", async (req, res) => {
   try {
     const { rows } = await client.query(
-      "SELECT key, created_at, used, user, expires_at FROM keys ORDER BY created_at DESC LIMIT 100"
+      "SELECT key, created_at, used, username, expires_at FROM keys ORDER BY created_at DESC LIMIT 100"
     );
 
     res.json({ keys: rows });
@@ -220,13 +220,13 @@ app.get("/keys", async (req, res) => {
 app.get("/export/keys.txt", async (req, res) => {
   try {
     const { rows } = await client.query(
-      "SELECT key, used, user FROM keys ORDER BY created_at DESC"
+      "SELECT key, used, username FROM keys ORDER BY created_at DESC"
     );
 
     const content = rows
       .map(
         (r) =>
-          `Key: ${r.key} | Usada: ${r.used ? "Sim" : "Não"} | Usuário: ${r.user || "-"
+          `Key: ${r.key} | Usada: ${r.used ? "Sim" : "Não"} | Usuário: ${r.username || "-"
           }`
       )
       .join("\n");
