@@ -2,75 +2,85 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const serverless = require("serverless-http");
-const PocketBase = require("pocketbase/cjs");
+const { Client } = require("pg");
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// URL do PocketBase
-const pb = new PocketBase(process.env.PB_URL || "http://127.0.0.1:8090");
+// Conexão com NEON POSTGRES
+const NEON_URL =
+  process.env.NEON_URL ||
+  "postgresql://neondb_owner:npg_PuXZ3fcqF0mp@ep-frosty-mud-acdojtkm-pooler.sa-east-1.aws.neon.tech/neondb?sslmode=require";
+
+const client = new Client({
+  connectionString: NEON_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+// Conectar uma vez só
+client.connect();
 
 // Função para checar se key existe
 async function keyExists(key) {
-  try {
-    await pb.collection("keys").getFirstListItem(`key="${key}"`);
-    return true;
-  } catch (err) {
-    return false;
-  }
+  const { rows } = await client.query(
+    "SELECT key FROM keys WHERE key = $1 LIMIT 1",
+    [key]
+  );
+  return rows.length > 0;
 }
 
-// Middleware para limpar keys expiradas
+// Middleware para limpar expiradas
 app.use(async (req, res, next) => {
-  try {
-    const now = new Date().toISOString();
-    const itens = await pb.collection("keys").getFullList();
-
-    for (const item of itens) {
-      if (item.expires_at && new Date(item.expires_at) < new Date()) {
-        await pb.collection("keys").delete(item.id);
-      }
-    }
-  } catch {}
+  await client.query(
+    `DELETE FROM keys 
+     WHERE expires_at IS NOT NULL 
+     AND expires_at < NOW()`
+  );
   next();
 });
 
 // Rota raiz
 app.get("/", (req, res) => {
-  res.send("API rodando no Vercel com PocketBase!");
+  res.send("API rodando no Vercel com Neon PostgreSQL!");
 });
 
-// Verificar key
+// Verificar se key existe
 app.get("/keys/:key/check", async (req, res) => {
   try {
     const key = req.params.key;
 
-    let item;
-    try {
-      item = await pb.collection("keys").getFirstListItem(`key="${key}"`);
-    } catch {
-      return res.json({ valid: false, message: "Key não encontrada" });
-    }
+    const { rows } = await client.query(
+      "SELECT key, used, expires_at FROM keys WHERE key = $1 LIMIT 1",
+      [key]
+    );
 
-    if (item.expires_at && new Date(item.expires_at) < new Date()) {
+    if (rows.length === 0)
+      return res.json({ valid: false, message: "Key não encontrada" });
+
+    const data = rows[0];
+
+    if (data.expires_at && new Date(data.expires_at) < new Date()) {
       return res.json({
         valid: false,
-        message: "Key expirada",
+        key,
         expired: true,
+        message: "Key expirada",
       });
     }
 
-    if (item.used) {
+    if (data.used) {
       return res.json({
         valid: false,
-        message: "Key já usada",
+        key,
         used: true,
+        message: "Key já usada",
       });
     }
 
     res.json({
       valid: true,
+      key,
       message: "Key válida",
     });
   } catch (err) {
@@ -78,21 +88,20 @@ app.get("/keys/:key/check", async (req, res) => {
   }
 });
 
-// Criar key fixa
+// Criar key
 app.post("/keys", async (req, res) => {
   try {
     const newKey = req.body.key;
-
     if (!newKey) return res.status(400).json({ error: "Key não informada" });
+
     if (await keyExists(newKey))
       return res.status(400).json({ error: "Key já existe" });
 
-    await pb.collection("keys").create({
-      key: newKey,
-      used: false,
-      user: null,
-      expires_at: null,
-    });
+    await client.query(
+      `INSERT INTO keys (key, created_at, used, user, expires_at)
+       VALUES ($1, NOW(), false, null, null)`,
+      [newKey]
+    );
 
     res.json({ success: true, key: newKey });
   } catch (err) {
@@ -105,21 +114,19 @@ app.post("/keys/temporaria", async (req, res) => {
   try {
     let { key, expires_at } = req.body;
 
-    if (!key) return res.status(400).json({ error: "Key não informada" });
     if (!expires_at)
-      return res.status(400).json({ error: "Data de expiração é obrigatória" });
+      return res.status(400).json({ error: "Data de expiração obrigatória" });
 
-    expires_at = new Date(expires_at).toISOString();
+    if (!key) return res.status(400).json({ error: "Key não informada" });
 
     if (await keyExists(key))
       return res.status(400).json({ error: "Key já existe" });
 
-    await pb.collection("keys").create({
-      key,
-      used: false,
-      user: null,
-      expires_at,
-    });
+    await client.query(
+      `INSERT INTO keys (key, created_at, used, user, expires_at)
+       VALUES ($1, NOW(), false, null, $2)`,
+      [key, expires_at]
+    );
 
     res.json({ success: true, key });
   } catch (err) {
@@ -130,14 +137,17 @@ app.post("/keys/temporaria", async (req, res) => {
 // Apagar key
 app.delete("/keys/:key", async (req, res) => {
   try {
-    const paramKey = req.params.key;
-    const item = await pb.collection("keys").getFirstListItem(`key="${paramKey}"`);
+    const key = req.params.key;
 
-    await pb.collection("keys").delete(item.id);
+    const { rowCount } = await client.query(
+      "DELETE FROM keys WHERE key = $1",
+      [key]
+    );
 
-    res.json({ success: true, message: "Key apagada" });
-  } catch {
-    res.status(404).json({ error: "Key não encontrada" });
+    if (rowCount > 0) res.json({ success: true, message: "Key apagada" });
+    else res.status(404).json({ error: "Key não encontrada" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -153,59 +163,67 @@ app.put("/keys/:key", async (req, res) => {
     if (await keyExists(newKey))
       return res.status(400).json({ error: "A nova key já existe" });
 
-    const item = await pb.collection("keys").getFirstListItem(`key="${oldKey}"`);
+    const { rowCount } = await client.query(
+      "UPDATE keys SET key = $1 WHERE key = $2",
+      [newKey, oldKey]
+    );
 
-    await pb.collection("keys").update(item.id, {
-      key: newKey,
-    });
-
-    res.json({ success: true, key: newKey });
-  } catch {
-    res.status(404).json({ error: "Key não encontrada" });
+    if (rowCount > 0) res.json({ success: true, key: newKey });
+    else res.status(404).json({ error: "Key não encontrada" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Marcar key como usada
+// Marcar key como usada e vincular usuário
 app.post("/keys/:key/use", async (req, res) => {
   try {
     const key = req.params.key;
     const user = req.body.user || null;
 
-    const item = await pb.collection("keys").getFirstListItem(`key="${key}"`);
+    const { rows } = await client.query(
+      "SELECT * FROM keys WHERE key = $1 LIMIT 1",
+      [key]
+    );
 
-    if (item.used)
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Key não encontrada" });
+
+    if (rows[0].used)
       return res.status(400).json({ error: "Key já usada" });
 
-    await pb.collection("keys").update(item.id, {
-      used: true,
-      user,
-    });
+    await client.query(
+      "UPDATE keys SET used = true, user = $1 WHERE key = $2",
+      [user, key]
+    );
 
     res.json({ success: true, key, user });
-  } catch {
-    res.status(404).json({ error: "Key não encontrada" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Listar todas as keys
 app.get("/keys", async (req, res) => {
   try {
-    const data = await pb.collection("keys").getFullList({
-      sort: "-created",
-    });
+    const { rows } = await client.query(
+      "SELECT key, created_at, used, user, expires_at FROM keys ORDER BY created_at DESC LIMIT 100"
+    );
 
-    res.json({ keys: data });
+    res.json({ keys: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Exportar txt
+// Exportar keys para TXT
 app.get("/export/keys.txt", async (req, res) => {
   try {
-    const rows = await pb.collection("keys").getFullList();
+    const { rows } = await client.query(
+      "SELECT key, used, user FROM keys ORDER BY created_at DESC"
+    );
 
-    let content = rows
+    const content = rows
       .map(
         (r) =>
           `Key: ${r.key} | Usada: ${r.used ? "Sim" : "Não"} | Usuário: ${
@@ -217,7 +235,7 @@ app.get("/export/keys.txt", async (req, res) => {
     res.setHeader("Content-Disposition", "attachment; filename=keys.txt");
     res.setHeader("Content-Type", "text/plain");
     res.send(content);
-  } catch {
+  } catch (err) {
     res.status(500).send("Erro ao exportar");
   }
 });
